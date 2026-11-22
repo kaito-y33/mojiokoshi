@@ -127,7 +127,7 @@
       <li>とても遅い → iOS 26以降で、Safariを最新にしてください（GPUが使えると速くなります）。</li>
       <li>目安は1ファイル60分以内です。それより長いときは分けてから使ってください。</li>
       <li>m4aが選べない → 選択画面で「ファイルを選択」をタップし、保存した場所（「このiPhone内」や「iCloud Drive」）から選んでください。</li>
-      <li>無音の部分に「ご視聴ありがとうございました」などの言葉が出ることがあります。AIの癖なので消してください。</li>
+      <li>無音の部分に、話していない言葉が出ることがあります。AIの癖なので消してください（よく出る「ご視聴ありがとうございました」は自動で取り除きます）。</li>
     </ul>
   </section>
 </main>
@@ -188,6 +188,7 @@ self.onmessage = async (e) => {
       chunk_length_s: 30,
       stride_length_s: 5,
       return_timestamps: true,
+      no_repeat_ngram_size: 8,   // 同じ言葉を延々と繰り返すループを防ぐ
       streamer,
     });
     self.postMessage({ type: 'done', text: out.text, chunks: out.chunks || [] });
@@ -513,7 +514,12 @@ self.onmessage = async (e) => {
           setStage({ stage: 'decode', seg: i, method: src.method });
           if (src.method === 'stream') { setStatus('音声を取り出しています…（' + (i + 1) + ' / ' + totalSegs + ' 区切り目）'); }
           const seg = await src.getSegment(i);
-          res = await runSegment(seg, device, segCounts[i], handlers);
+          let sq = 0; for (let x = 0; x < seg.length; x += 4) sq += seg[x] * seg[x];
+          if (Math.sqrt(sq / Math.max(1, seg.length / 4)) < 0.001) {
+            res = { chunks: [] };   // ほぼ無音の区切りは飛ばす（AIが架空の言葉を作るのを防ぐ）
+          } else {
+            res = await runSegment(seg, device, segCounts[i], handlers);
+          }
         } catch (e) {
           if (device === 'webgpu' && attempt === 0) {
             setStatus('GPUで動かせなかったため、CPUで処理し直します…', 'warn');
@@ -530,6 +536,7 @@ self.onmessage = async (e) => {
       const offset = i * SEG_SEC, segEnd = Math.min(duration, (i + 1) * SEG_SEC);
       const got = res.chunks && res.chunks.length ? res.chunks : (res.text ? [{ timestamp: [0, null], text: res.text }] : []);
       for (const c of got) {
+        if (/^\s*[（(]?(ご視聴ありがとうございました。?|音楽)[)）]?\s*$/.test(c.text || '')) continue;  // 無音部分によく出る架空の言葉
         const ts = c.timestamp || [0, null];
         state.chunks.push({ timestamp: [(ts[0] ?? 0) + offset, ts[1] == null ? segEnd : ts[1] + offset], text: c.text });
       }
