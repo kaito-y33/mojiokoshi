@@ -63,6 +63,8 @@
   .note { font-size: 13px; color: var(--sub); }
   .note li { margin-bottom: 4px; }
   .rnote { font-size: 13px; color: var(--ok); margin: 0 0 8px; }
+  label.cpu { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 14px; }
+  label.cpu input { transform: scale(1.2); }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -91,6 +93,7 @@
       <label><input type="radio" name="model" value="onnx-community/whisper-tiny">
         <div><b>お試し（速いが不正確）</b><span>約40〜100MB。動作確認用です。</span></div></label>
     </div>
+    <label class="cpu"><input type="checkbox" id="cpuOnly"> CPUで処理する（落ちにくいが遅い）</label>
     <p class="note" style="margin:10px 0 0">読み込んだデータはブラウザに保存されるので、2回目からは速くなります。初回はWi-Fiで使ってください。</p>
   </section>
 
@@ -205,9 +208,41 @@ self.onmessage = async (e) => {
   const SEG_SEC = 300;          // 5分ずつ処理して、そのたびに保存する
   const RATE = 16000;
   const KEY = 'mojiokoshi:last';
+  const STAGE_KEY = 'mojiokoshi:stage';
+  const CPU_KEY = 'mojiokoshi:cpu';
+  const MB_URL = 'https://cdn.jsdelivr.net/npm/mediabunny@1.66.2/dist/bundles/mediabunny.min.mjs';
 
   let file = null, worker = null, busy = false, timer = null, t0 = 0, wakeLock = null;
   let saved = loadSaved();
+  const cpuBox = $('cpuOnly');
+
+  // ---------- 途中で落ちた段階の記録（原因の切り分け用） ----------
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (_) {} }
+  function setStage(o) { lsSet(STAGE_KEY, JSON.stringify(Object.assign({ at: Date.now() }, o))); }
+  function clearStage() { lsDel(STAGE_KEY); }
+  const STAGE_LABEL = { decode: '音声の取り出し', model: 'AIモデルの読み込み', run: '文字起こし' };
+
+  cpuBox.checked = lsGet(CPU_KEY) === '1';
+  cpuBox.addEventListener('change', () => { cpuBox.checked ? lsSet(CPU_KEY, '1') : lsDel(CPU_KEY); });
+
+  let crashMsg = '';
+  try {
+    const st = JSON.parse(lsGet(STAGE_KEY) || 'null');
+    if (st && st.stage) {
+      crashMsg = '前回は「' + (STAGE_LABEL[st.stage] || st.stage) + '」の途中（' + ((st.seg || 0) + 1) + '区切り目' + (st.device ? '・' + (st.device === 'webgpu' ? 'GPU' : 'CPU') : '') + '）で止まりました。iPhoneのメモリ不足でページが再読み込みされた可能性が高いです。';
+      if ((st.stage === 'model' || st.stage === 'run') && st.device === 'webgpu') {
+        cpuBox.checked = true; lsSet(CPU_KEY, '1');
+        crashMsg += '次はCPUで処理するように切り替えました（遅くなりますが落ちにくくなります）。';
+      } else if (st.device === 'wasm') {
+        crashMsg += '精度を「お試し」にするか、ほかのアプリを終了してから試してください。';
+      } else if (st.stage === 'decode') {
+        crashMsg += 'ファイルを短く分けてから試してください。';
+      }
+      clearStage();
+    }
+  } catch (_) {}
 
   // ---------- 保存（このiPhoneのSafariの中だけ） ----------
   function loadSaved() { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (_) { return null; } }
@@ -249,12 +284,14 @@ self.onmessage = async (e) => {
       ? '前回の結果（' + saved.name + '）'
       : '前回の途中までの結果（' + saved.name + '：' + saved.segDone + ' / ' + saved.totalSegs + ' 区切り）。同じファイルを選ぶと続きから再開できます。');
   }
+  if (crashMsg) setStatus(crashMsg, 'warn');
 
   fileInput.addEventListener('change', () => {
     file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
     if (!file) { $('fileinfo').textContent = ''; refreshButtons(); return; }
     $('fileinfo').textContent = '選択中：' + file.name + '（' + fmtMB(file.size) + '）';
-    setStatus(isResumable(file) ? '前回の続きから再開できます。' : '');
+    if (isResumable(file)) setStatus((crashMsg ? crashMsg + ' ' : '') + '前回の続きから再開できます。', crashMsg ? 'warn' : '');
+    else if (!crashMsg) setStatus('');
     refreshButtons();
     checkDuration(file);
   });
@@ -269,7 +306,7 @@ self.onmessage = async (e) => {
         const d = el.duration; URL.revokeObjectURL(url);
         if (!isFinite(d) || d <= 0) return;
         $('fileinfo').textContent += '　長さ：' + fmtClock(d);
-        if (d > 60 * 60) setStatus('60分を超えると、音声の読み込みでメモリ不足になることがあります。止まる場合は分けてから使ってください。', 'warn');
+        if (d > 60 * 60 && typeof AudioDecoder === 'undefined') setStatus('60分を超えると、音声の読み込みでメモリ不足になることがあります。止まる場合は分けてから使ってください。', 'warn');
       };
       el.onerror = () => URL.revokeObjectURL(url);
       el.src = url;
@@ -313,6 +350,60 @@ self.onmessage = async (e) => {
     decoded = null;
     const rendered = await off.startRendering();
     return { audio: rendered.getChannelData(0), duration };
+  }
+
+  // ---------- 音声を5分ずつ取り出す（ファイル全体を読み込まないのでメモリをほとんど使わない） ----------
+  async function openStreaming(f) {
+    if (typeof AudioDecoder === 'undefined') throw new Error('AudioDecoder非対応');
+    const MB = await import(MB_URL);
+    const input = new MB.Input({ source: new MB.BlobSource(f), formats: MB.ALL_FORMATS });
+    const track = await input.getPrimaryAudioTrack();
+    if (!track) throw new Error('音声トラックがありません');
+    if (!(await track.canDecode())) throw new Error('この音声形式は取り出せません');
+    const duration = await track.computeDuration();
+    if (!(duration > 0)) throw new Error('長さを取得できません');
+    const sink = new MB.AudioBufferSink(track);
+    return {
+      method: 'stream', duration,
+      async getSegment(i) {
+        const segStart = i * SEG_SEC, segEnd = Math.min(duration, (i + 1) * SEG_SEC);
+        const outLen = Math.max(1, Math.ceil((segEnd - segStart) * RATE));
+        const out = new Float32Array(outLen), cnt = new Uint16Array(outLen);
+        for await (const wb of sink.buffers(segStart, segEnd)) {
+          const b = wb.buffer, sr = b.sampleRate, n = b.length, chs = b.numberOfChannels;
+          const ch = []; for (let c = 0; c < chs; c++) ch.push(b.getChannelData(c));
+          const k = RATE / sr, base = (wb.timestamp - segStart) * RATE;
+          for (let j = 0; j < n; j++) {
+            const idx = Math.floor(base + j * k);
+            if (idx < 0 || idx >= outLen) continue;
+            let v = 0; for (let c = 0; c < chs; c++) v += ch[c][j];
+            out[idx] += v / chs; cnt[idx]++;
+          }
+        }
+        let last = 0;
+        for (let x = 0; x < outLen; x++) { if (cnt[x]) { out[x] /= cnt[x]; last = out[x]; } else out[x] = last; }
+        return out;
+      },
+      close() { try { input.dispose(); } catch (_) {} },
+    };
+  }
+
+  // 取り出せない形式のときは、従来どおり全体を一度に展開する
+  async function openFull(f) {
+    const r = await decodeTo16kMono(f);
+    let audio = r.audio;
+    return {
+      method: 'full', duration: r.duration,
+      async getSegment(i) { return audio.slice(i * SEG_SEC * RATE, Math.min(audio.length, (i + 1) * SEG_SEC * RATE)); },
+      close() { audio = null; },
+    };
+  }
+
+  async function openAudio(f) {
+    try { return await openStreaming(f); }
+    catch (e) { console.warn('streaming decode unavailable, fallback:', e); }
+    setStage({ stage: 'decode', seg: 0, method: 'full' });
+    return await openFull(f);
   }
 
   function countChunks(duration) { return duration <= 30 ? 1 : 1 + Math.ceil((duration - 30) / 20); }
@@ -365,13 +456,15 @@ self.onmessage = async (e) => {
     detailEl.textContent = ''; elapsedEl.textContent = '';
     await keepAwake(); startTimer();
 
-    let audio, duration;
+    let src, duration;
     try {
       setStatus('動画から音声を取り出しています…');
-      const r = await decodeTo16kMono(file);
-      audio = r.audio; duration = r.duration;
+      src = await openAudio(file);
+      duration = src.duration;
+      clearStage();
       if (!(duration >= 0.5)) throw new Error('short');
     } catch (e) {
+      clearStage();
       setStatus('音声を読み込めませんでした。動画を短く分けるか、音声だけのファイル（m4a）にしてから選んでください。', 'err');
       bar.classList.add('hidden'); finish(); return;
     }
@@ -393,8 +486,9 @@ self.onmessage = async (e) => {
     let doneBefore = segCounts.slice(0, state.segDone).reduce((a, b) => a + b, 0);
     let doneThisRun = 0;
     const runStart = Date.now();
-    let device = (await hasWebGPU()) ? 'webgpu' : 'wasm';
+    let device = (!cpuBox.checked && await hasWebGPU()) ? 'webgpu' : 'wasm';
     const label = () => (device === 'webgpu' ? 'GPU' : 'CPU');
+    let curSeg = state.segDone;
 
     const showProgress = (inSeg) => {
       bar.max = totalChunks;
@@ -405,24 +499,28 @@ self.onmessage = async (e) => {
       detailEl.textContent = g + ' / ' + totalChunks + ' 区間（' + label() + '）' + (doneNow > 0 ? '　残り約' + fmtClock(remain) : '');
     };
     const handlers = {
-      loading: () => { setStatus('文字起こし用のデータを準備しています…（初回のみ時間がかかります）'); bar.removeAttribute('value'); detailEl.textContent = label() + 'で処理します'; },
+      loading: () => { setStage({ stage: 'model', seg: curSeg, device, model: selectedModel() }); setStatus('文字起こし用のデータを準備しています…（初回のみ時間がかかります）'); bar.removeAttribute('value'); detailEl.textContent = label() + 'で処理します'; },
       download: (loaded, total) => { if (total > 0) { bar.max = 100; bar.value = Math.min(100, loaded / total * 100); detailEl.textContent = 'ダウンロード中 ' + fmtMB(loaded) + ' / ' + fmtMB(total); } },
-      running: () => { setStatus('文字起こし中です。このページを開いたままお待ちください。'); liveEl.style.display = 'block'; showProgress(0); },
+      running: () => { setStage({ stage: 'run', seg: curSeg, device, model: selectedModel() }); setStatus('文字起こし中です。このページを開いたままお待ちください。'); liveEl.style.display = 'block'; showProgress(0); },
       chunk: (d) => showProgress(d),
     };
 
     for (let i = state.segDone; i < totalSegs; i++) {
-      const s0 = i * SEG_SEC * RATE, s1 = Math.min(audio.length, (i + 1) * SEG_SEC * RATE);
+      curSeg = i;
       let res = null;
       for (let attempt = 0; attempt < 2 && !res; attempt++) {
         try {
-          res = await runSegment(audio.slice(s0, s1), device, segCounts[i], handlers);
+          setStage({ stage: 'decode', seg: i, method: src.method });
+          if (src.method === 'stream') { setStatus('音声を取り出しています…（' + (i + 1) + ' / ' + totalSegs + ' 区切り目）'); }
+          const seg = await src.getSegment(i);
+          res = await runSegment(seg, device, segCounts[i], handlers);
         } catch (e) {
           if (device === 'webgpu' && attempt === 0) {
             setStatus('GPUで動かせなかったため、CPUで処理し直します…', 'warn');
             if (worker) { worker.terminate(); worker = null; }
             device = 'wasm';
           } else {
+            clearStage(); src.close();
             setStatus('エラーで止まりました：' + e.message + '（ここまでの結果は保存済みです。精度を「お試し」にして同じファイルを選ぶと、続きから再開できます）', 'err');
             finish(); return;
           }
@@ -444,7 +542,7 @@ self.onmessage = async (e) => {
         : '');
     }
 
-    audio = null;
+    src.close(); clearStage();
     state.finished = true; store(state);
     bar.max = totalChunks; bar.value = totalChunks;
     liveEl.style.display = 'none';
