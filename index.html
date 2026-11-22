@@ -73,9 +73,9 @@
     <div class="step">① 動画を選ぶ</div>
     <label class="file" for="file">
       タップして動画を選ぶ
-      <small>写真アプリの動画、またはファイル（mp4 / mov / m4a / mp3 など）</small>
+      <small>写真アプリの動画、またはファイル（mp4 / mov / m4a / mp3 / wav など）<br>m4aなどは「ファイルを選択」から選んでください</small>
     </label>
-    <input id="file" type="file" accept="video/*,audio/*">
+    <input id="file" type="file">
     <div id="fileinfo" class="fileinfo"></div>
   </section>
 
@@ -118,7 +118,8 @@
       <li>途中でページが再読み込みされる → iPhoneのメモリ不足です。「標準」か「お試し」に変えるか、動画を短く分けてください。</li>
       <li>「音声を読み込めませんでした」と出る → 動画を短くするか、音声だけのファイル（m4a）にしてから選んでください。</li>
       <li>とても遅い → iOS 26以降で、Safariを最新にしてください（GPUが使えると速くなります）。</li>
-      <li>目安は10分以内の動画です。長い動画は写真アプリの「編集」で分けてから使ってください。</li>
+      <li>目安は1ファイル20〜30分以内です。長い動画は写真アプリの「編集」で分けるか、音声（m4a）にしてから分けて使ってください。</li>
+      <li>m4aが選べない → 選択画面で「ファイルを選択」をタップし、保存した場所（「このiPhone内」や「iCloud Drive」）から選んでください。</li>
     </ul>
   </section>
 </main>
@@ -211,7 +212,26 @@ self.onmessage = async (e) => {
     startBtn.disabled = false; startBtn.textContent = '文字起こしを始める';
     if (file.size > 700 * 1048576) setStatus('ファイルが大きいため、途中で止まる可能性があります。短く分けるのがおすすめです。', 'warn');
     else setStatus('');
+    checkDuration(file);
   });
+
+  // 長さを先に調べて、長すぎる場合は警告（メモリ不足でページが落ちるのを防ぐため）
+  function checkDuration(f) {
+    try {
+      const url = URL.createObjectURL(f);
+      const el = document.createElement(/^video\//.test(f.type) ? 'video' : 'audio');
+      el.preload = 'metadata';
+      el.onloadedmetadata = () => {
+        const d = el.duration; URL.revokeObjectURL(url);
+        if (!isFinite(d) || d <= 0) return;
+        let msg = '長さ：' + fmtClock(d);
+        if (d > 30 * 60) { setStatus(msg + '。30分を超えるとiPhoneのメモリ不足で止まりやすいので、20〜30分ずつに分けるのがおすすめです。', 'warn'); return; }
+        if (!statusEl.textContent) $('fileinfo').textContent += '　' + msg;
+      };
+      el.onerror = () => URL.revokeObjectURL(url);
+      el.src = url;
+    } catch (_) {}
+  }
 
   async function decodeTo16kMono(f) {
     const buf = await f.arrayBuffer();
