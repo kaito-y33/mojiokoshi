@@ -47,6 +47,7 @@
   }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button.small { margin-top: 8px; padding: 10px 12px; font-size: 14px; }
   .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 10px; }
   .row button { padding: 12px 8px; font-size: 14px; }
   .status { font-size: 15px; margin: 10px 0 6px; min-height: 1.6em; }
@@ -61,6 +62,7 @@
           background: var(--bg); border-radius: 10px; padding: 10px; margin-top: 8px; display: none; }
   .note { font-size: 13px; color: var(--sub); }
   .note li { margin-bottom: 4px; }
+  .rnote { font-size: 13px; color: var(--ok); margin: 0 0 8px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -95,15 +97,17 @@
   <section class="card">
     <div class="step">③ 文字起こしする</div>
     <button id="start" disabled>動画を選んでください</button>
+    <button id="restart" class="secondary small hidden">最初からやり直す</button>
     <div id="status" class="status"></div>
     <progress id="bar" class="hidden" max="100" value="0"></progress>
     <div class="meta"><span id="detail"></span><span id="elapsed"></span></div>
     <div id="live" class="live"></div>
-    <p class="note" style="margin:10px 0 0">処理中は<b>このページを開いたまま</b>にしてください。ほかのアプリに切り替えると止まることがあります。</p>
+    <p class="note" style="margin:10px 0 0">処理中は<b>このページを開いたまま</b>にしてください。5分ごとに結果を自動保存するので、途中で止まっても続きから再開できます。</p>
   </section>
 
   <section id="resultCard" class="card hidden">
     <div class="step">④ 結果</div>
+    <p id="resultNote" class="rnote"></p>
     <textarea id="result" spellcheck="false"></textarea>
     <div class="row">
       <button id="copy">コピー</button>
@@ -115,11 +119,12 @@
   <section class="card">
     <div class="step">うまくいかないとき</div>
     <ul class="note" style="padding-left:18px;margin:0">
-      <li>途中でページが再読み込みされる → iPhoneのメモリ不足です。「標準」か「お試し」に変えるか、動画を短く分けてください。</li>
-      <li>「音声を読み込めませんでした」と出る → 動画を短くするか、音声だけのファイル（m4a）にしてから選んでください。</li>
+      <li>途中でページが再読み込みされる → iPhoneのメモリ不足です。ページを開き直して<b>同じファイルを選ぶと、続きから再開</b>できます。何度も止まるときは「お試し」にするか、ほかのアプリを終了してから試してください。</li>
+      <li>「音声を読み込めませんでした」と出る → 動画を短く分けるか、音声だけのファイル（m4a）にしてから選んでください。</li>
       <li>とても遅い → iOS 26以降で、Safariを最新にしてください（GPUが使えると速くなります）。</li>
-      <li>目安は1ファイル20〜30分以内です。長い動画は写真アプリの「編集」で分けるか、音声（m4a）にしてから分けて使ってください。</li>
+      <li>目安は1ファイル60分以内です。それより長いときは分けてから使ってください。</li>
       <li>m4aが選べない → 選択画面で「ファイルを選択」をタップし、保存した場所（「このiPhone内」や「iCloud Drive」）から選んでください。</li>
+      <li>無音の部分に「ご視聴ありがとうございました」などの言葉が出ることがあります。AIの癖なので消してください。</li>
     </ul>
   </section>
 </main>
@@ -145,6 +150,7 @@ async function load(model, device) {
   if (asr && loadedKey === key) return;
   if (asr && asr.dispose) { try { await asr.dispose(); } catch (_) {} }
   asr = null;
+  self.postMessage({ type: 'phase', phase: 'loading', device });
   const files = {};
   asr = await pipeline('automatic-speech-recognition', model, {
     device,
@@ -164,7 +170,6 @@ async function load(model, device) {
 self.onmessage = async (e) => {
   const { audio, model, device, totalChunks } = e.data;
   try {
-    self.postMessage({ type: 'phase', phase: 'loading', device });
     await load(model, device);
 
     self.postMessage({ type: 'phase', phase: 'running', device });
@@ -193,29 +198,68 @@ self.onmessage = async (e) => {
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
-  const fileInput = $('file'), startBtn = $('start'), statusEl = $('status'), bar = $('bar');
+  const fileInput = $('file'), startBtn = $('start'), restartBtn = $('restart'), statusEl = $('status'), bar = $('bar');
   const detailEl = $('detail'), elapsedEl = $('elapsed'), liveEl = $('live');
-  const resultCard = $('resultCard'), resultEl = $('result');
+  const resultCard = $('resultCard'), resultEl = $('result'), resultNote = $('resultNote');
 
-  let file = null, worker = null, busy = false, timer = null, t0 = 0;
-  let lastChunks = [], audioDuration = 0, wakeLock = null;
+  const SEG_SEC = 300;          // 5分ずつ処理して、そのたびに保存する
+  const RATE = 16000;
+  const KEY = 'mojiokoshi:last';
 
+  let file = null, worker = null, busy = false, timer = null, t0 = 0, wakeLock = null;
+  let saved = loadSaved();
+
+  // ---------- 保存（このiPhoneのSafariの中だけ） ----------
+  function loadSaved() { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (_) { return null; } }
+  function store(s) { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (_) {} }
+
+  // ---------- 表示まわり ----------
   function setStatus(text, kind) { statusEl.textContent = text; statusEl.className = 'status' + (kind ? ' ' + kind : ''); }
   function fmtMB(b) { return (b / 1048576).toFixed(0) + 'MB'; }
   function fmtClock(sec) { sec = Math.max(0, Math.round(sec)); const m = Math.floor(sec / 60), s = sec % 60; return m + '分' + String(s).padStart(2, '0') + '秒'; }
   function selectedModel() { return document.querySelector('input[name=model]:checked').value; }
+  function chunksToText(chunks) { return (chunks || []).map(c => (c.text || '').trim()).filter(Boolean).join('\n'); }
+  function showResult(chunks, note) {
+    resultEl.value = chunksToText(chunks);
+    resultNote.textContent = note || '';
+    resultCard.classList.toggle('hidden', !resultEl.value);
+  }
+
+  function isResumable(f) {
+    return !!(saved && !saved.finished && f && saved.name === f.name && saved.size === f.size
+      && saved.segDone > 0 && saved.segDone < saved.totalSegs);
+  }
+
+  function refreshButtons() {
+    if (!file) { startBtn.disabled = true; startBtn.textContent = '動画を選んでください'; restartBtn.classList.add('hidden'); return; }
+    startBtn.disabled = busy;
+    if (busy) return;
+    if (isResumable(file)) {
+      startBtn.textContent = '続きから文字起こし（' + saved.segDone + ' / ' + saved.totalSegs + ' 区切り済み）';
+      restartBtn.classList.remove('hidden');
+    } else {
+      startBtn.textContent = '文字起こしを始める';
+      restartBtn.classList.add('hidden');
+    }
+  }
+
+  // ページを開いたとき、前回の結果があれば表示する
+  if (saved && saved.chunks && saved.chunks.length) {
+    showResult(saved.chunks, saved.finished
+      ? '前回の結果（' + saved.name + '）'
+      : '前回の途中までの結果（' + saved.name + '：' + saved.segDone + ' / ' + saved.totalSegs + ' 区切り）。同じファイルを選ぶと続きから再開できます。');
+  }
 
   fileInput.addEventListener('change', () => {
     file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
-    if (!file) { $('fileinfo').textContent = ''; startBtn.disabled = true; startBtn.textContent = '動画を選んでください'; return; }
+    if (!file) { $('fileinfo').textContent = ''; refreshButtons(); return; }
     $('fileinfo').textContent = '選択中：' + file.name + '（' + fmtMB(file.size) + '）';
-    startBtn.disabled = false; startBtn.textContent = '文字起こしを始める';
-    if (file.size > 700 * 1048576) setStatus('ファイルが大きいため、途中で止まる可能性があります。短く分けるのがおすすめです。', 'warn');
-    else setStatus('');
+    setStatus(isResumable(file) ? '前回の続きから再開できます。' : '');
+    refreshButtons();
     checkDuration(file);
   });
 
-  // 長さを先に調べて、長すぎる場合は警告（メモリ不足でページが落ちるのを防ぐため）
+  // 長さを先に調べて、長すぎる場合は警告
   function checkDuration(f) {
     try {
       const url = URL.createObjectURL(f);
@@ -224,19 +268,20 @@ self.onmessage = async (e) => {
       el.onloadedmetadata = () => {
         const d = el.duration; URL.revokeObjectURL(url);
         if (!isFinite(d) || d <= 0) return;
-        let msg = '長さ：' + fmtClock(d);
-        if (d > 30 * 60) { setStatus(msg + '。30分を超えるとiPhoneのメモリ不足で止まりやすいので、20〜30分ずつに分けるのがおすすめです。', 'warn'); return; }
-        if (!statusEl.textContent) $('fileinfo').textContent += '　' + msg;
+        $('fileinfo').textContent += '　長さ：' + fmtClock(d);
+        if (d > 60 * 60) setStatus('60分を超えると、音声の読み込みでメモリ不足になることがあります。止まる場合は分けてから使ってください。', 'warn');
       };
       el.onerror = () => URL.revokeObjectURL(url);
       el.src = url;
     } catch (_) {}
   }
 
+  // ---------- 音声の取り出し（16kHz・モノラル。メモリ節約のため最初から16kHzで展開） ----------
   async function decodeTo16kMono(f) {
-    const buf = await f.arrayBuffer();
+    let buf = await f.arrayBuffer();
     const AC = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AC();
+    let ctx;
+    try { ctx = new AC({ sampleRate: RATE }); } catch (_) { ctx = new AC(); }
     let decoded;
     try {
       decoded = await new Promise((resolve, reject) => {
@@ -244,14 +289,30 @@ self.onmessage = async (e) => {
         if (p && p.then) p.then(resolve, reject);
       });
     } finally { try { ctx.close(); } catch (_) {} }
-    const rate = 16000;
-    const length = Math.max(1, Math.ceil(decoded.duration * rate));
+    buf = null;
+    const duration = decoded.duration;
+
+    if (decoded.sampleRate === RATE) {
+      const n = decoded.length, chs = decoded.numberOfChannels;
+      if (chs === 1) return { audio: decoded.getChannelData(0), duration };
+      const out = new Float32Array(n);
+      for (let c = 0; c < chs; c++) {
+        const d = decoded.getChannelData(c);
+        for (let i = 0; i < n; i++) out[i] += d[i];
+      }
+      for (let i = 0; i < n; i++) out[i] /= chs;
+      return { audio: out, duration };
+    }
+
+    // 16kHzで展開できなかった場合のみ変換
+    const length = Math.max(1, Math.ceil(duration * RATE));
     const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-    const off = new OAC(1, length, rate);
+    const off = new OAC(1, length, RATE);
     const src = off.createBufferSource();
     src.buffer = decoded; src.connect(off.destination); src.start(0);
+    decoded = null;
     const rendered = await off.startRendering();
-    return { audio: rendered.getChannelData(0), duration: decoded.duration };
+    return { audio: rendered.getChannelData(0), duration };
   }
 
   function countChunks(duration) { return duration <= 30 ? 1 : 1 + Math.ceil((duration - 30) / 20); }
@@ -274,114 +335,152 @@ self.onmessage = async (e) => {
   function startTimer() { t0 = Date.now(); clearInterval(timer); timer = setInterval(() => { elapsedEl.textContent = '経過 ' + fmtClock((Date.now() - t0) / 1000); }, 1000); }
   function stopTimer() { clearInterval(timer); }
 
-  function finish() { busy = false; startBtn.disabled = !file; startBtn.textContent = '文字起こしを始める'; stopTimer(); releaseAwake(); }
+  function finish() { busy = false; stopTimer(); releaseAwake(); refreshButtons(); }
 
-  function runOnWorker(audio, device, totalChunks) {
+  // 1区切り（最大5分）をワーカーで文字起こしする
+  function runSegment(seg, device, segChunks, h) {
     return new Promise((resolve, reject) => {
       if (!worker) worker = makeWorker();
       worker.onerror = (ev) => { ev.preventDefault && ev.preventDefault(); worker.terminate(); worker = null; reject(new Error((ev && ev.message) || 'ワーカーの起動に失敗しました')); };
       worker.onmessage = (ev) => {
         const m = ev.data;
-        if (m.type === 'phase' && m.phase === 'loading') {
-          setStatus('文字起こし用のデータを準備しています…（初回のみ時間がかかります）');
-          bar.classList.remove('hidden'); bar.removeAttribute('value');
-          detailEl.textContent = m.device === 'webgpu' ? 'GPUで処理します' : 'CPUで処理します（少し遅め）';
-        } else if (m.type === 'download') {
-          if (m.total > 0) { bar.max = 100; bar.value = Math.min(100, m.loaded / m.total * 100); detailEl.textContent = 'ダウンロード中 ' + fmtMB(m.loaded) + ' / ' + fmtMB(m.total); }
-        } else if (m.type === 'phase' && m.phase === 'running') {
-          setStatus('文字起こし中です。このページを開いたままお待ちください。');
-          bar.max = totalChunks; bar.value = 0;
-          detailEl.textContent = '0 / ' + totalChunks + ' 区間（' + (m.device === 'webgpu' ? 'GPU' : 'CPU') + '）';
-          liveEl.style.display = 'block'; liveEl.textContent = '';
-        } else if (m.type === 'live') {
-          liveEl.textContent += m.text; liveEl.scrollTop = liveEl.scrollHeight;
-        } else if (m.type === 'chunk') {
-          bar.value = Math.min(m.done, totalChunks);
-          const remain = m.done > 0 ? (Date.now() - t0) / m.done * (totalChunks - m.done) / 1000 : 0;
-          detailEl.textContent = Math.min(m.done, totalChunks) + ' / ' + totalChunks + ' 区間　残り約' + fmtClock(remain);
-        } else if (m.type === 'done') {
-          resolve(m);
-        } else if (m.type === 'error') {
-          reject(new Error(m.message));
-        }
+        if (m.type === 'phase' && m.phase === 'loading') h.loading(m.device);
+        else if (m.type === 'download') h.download(m.loaded, m.total);
+        else if (m.type === 'phase' && m.phase === 'running') h.running(m.device);
+        else if (m.type === 'live') { liveEl.textContent += m.text; liveEl.scrollTop = liveEl.scrollHeight; }
+        else if (m.type === 'chunk') h.chunk(Math.min(m.done, segChunks));
+        else if (m.type === 'done') resolve(m);
+        else if (m.type === 'error') reject(new Error(m.message));
       };
-      worker.postMessage({ audio, model: selectedModel(), device, totalChunks });
+      worker.postMessage({ audio: seg, model: selectedModel(), device, totalChunks: segChunks }, [seg.buffer]);
     });
   }
 
-  startBtn.addEventListener('click', async () => {
+  async function run(fromStart) {
     if (!file || busy) return;
-    busy = true; startBtn.disabled = true; startBtn.textContent = '処理中…';
-    resultCard.classList.add('hidden'); liveEl.style.display = 'none';
+    busy = true; refreshButtons();
+    startBtn.textContent = '処理中…'; restartBtn.classList.add('hidden');
+    liveEl.style.display = 'none'; liveEl.textContent = '';
     bar.classList.remove('hidden'); bar.removeAttribute('value');
     detailEl.textContent = ''; elapsedEl.textContent = '';
     await keepAwake(); startTimer();
 
-    let audio;
+    let audio, duration;
     try {
       setStatus('動画から音声を取り出しています…');
       const r = await decodeTo16kMono(file);
-      audio = r.audio; audioDuration = r.duration;
-      if (audioDuration < 0.5) throw new Error('short');
+      audio = r.audio; duration = r.duration;
+      if (!(duration >= 0.5)) throw new Error('short');
     } catch (e) {
-      setStatus('音声を読み込めませんでした。動画を短くするか、音声だけのファイル（m4a）にしてから選んでください。', 'err');
+      setStatus('音声を読み込めませんでした。動画を短く分けるか、音声だけのファイル（m4a）にしてから選んでください。', 'err');
       bar.classList.add('hidden'); finish(); return;
     }
 
-    const totalChunks = countChunks(audioDuration);
-    detailEl.textContent = '長さ ' + fmtClock(audioDuration);
+    const totalSegs = Math.max(1, Math.ceil(duration / SEG_SEC));
+    let state;
+    if (!fromStart && isResumable(file) && saved.totalSegs === totalSegs) {
+      state = saved;
+    } else {
+      state = { name: file.name, size: file.size, duration, totalSegs, segDone: 0, chunks: [], finished: false };
+    }
+    state.model = selectedModel(); state.savedAt = Date.now();
+    saved = state; store(state);
+    showResult(state.chunks, state.segDone ? '途中から再開しています（' + state.segDone + ' / ' + totalSegs + ' 区切り済み）' : '');
 
+    const segCounts = [];
+    for (let i = 0; i < totalSegs; i++) segCounts.push(countChunks(Math.min(SEG_SEC, duration - i * SEG_SEC)));
+    const totalChunks = segCounts.reduce((a, b) => a + b, 0);
+    let doneBefore = segCounts.slice(0, state.segDone).reduce((a, b) => a + b, 0);
+    let doneThisRun = 0;
+    const runStart = Date.now();
     let device = (await hasWebGPU()) ? 'webgpu' : 'wasm';
-    let res;
-    try {
-      res = await runOnWorker(audio, device, totalChunks);
-    } catch (e1) {
-      if (device === 'webgpu') {
-        setStatus('GPUで動かせなかったため、CPUで処理し直します…', 'warn');
-        if (worker) { worker.terminate(); worker = null; }
-        device = 'wasm';
-        try { res = await runOnWorker(audio, device, totalChunks); }
-        catch (e2) { setStatus('エラーで止まりました：' + e2.message + '（精度を「標準」か「お試し」にすると動くことがあります）', 'err'); finish(); return; }
-      } else {
-        setStatus('エラーで止まりました：' + e1.message + '（精度を「標準」か「お試し」にすると動くことがあります）', 'err'); finish(); return;
+    const label = () => (device === 'webgpu' ? 'GPU' : 'CPU');
+
+    const showProgress = (inSeg) => {
+      bar.max = totalChunks;
+      const g = doneBefore + inSeg;
+      bar.value = g;
+      const doneNow = doneThisRun + inSeg;
+      const remain = doneNow > 0 ? (Date.now() - runStart) / doneNow * (totalChunks - g) / 1000 : 0;
+      detailEl.textContent = g + ' / ' + totalChunks + ' 区間（' + label() + '）' + (doneNow > 0 ? '　残り約' + fmtClock(remain) : '');
+    };
+    const handlers = {
+      loading: () => { setStatus('文字起こし用のデータを準備しています…（初回のみ時間がかかります）'); bar.removeAttribute('value'); detailEl.textContent = label() + 'で処理します'; },
+      download: (loaded, total) => { if (total > 0) { bar.max = 100; bar.value = Math.min(100, loaded / total * 100); detailEl.textContent = 'ダウンロード中 ' + fmtMB(loaded) + ' / ' + fmtMB(total); } },
+      running: () => { setStatus('文字起こし中です。このページを開いたままお待ちください。'); liveEl.style.display = 'block'; showProgress(0); },
+      chunk: (d) => showProgress(d),
+    };
+
+    for (let i = state.segDone; i < totalSegs; i++) {
+      const s0 = i * SEG_SEC * RATE, s1 = Math.min(audio.length, (i + 1) * SEG_SEC * RATE);
+      let res = null;
+      for (let attempt = 0; attempt < 2 && !res; attempt++) {
+        try {
+          res = await runSegment(audio.slice(s0, s1), device, segCounts[i], handlers);
+        } catch (e) {
+          if (device === 'webgpu' && attempt === 0) {
+            setStatus('GPUで動かせなかったため、CPUで処理し直します…', 'warn');
+            if (worker) { worker.terminate(); worker = null; }
+            device = 'wasm';
+          } else {
+            setStatus('エラーで止まりました：' + e.message + '（ここまでの結果は保存済みです。精度を「お試し」にして同じファイルを選ぶと、続きから再開できます）', 'err');
+            finish(); return;
+          }
+        }
       }
+
+      const offset = i * SEG_SEC, segEnd = Math.min(duration, (i + 1) * SEG_SEC);
+      const got = res.chunks && res.chunks.length ? res.chunks : (res.text ? [{ timestamp: [0, null], text: res.text }] : []);
+      for (const c of got) {
+        const ts = c.timestamp || [0, null];
+        state.chunks.push({ timestamp: [(ts[0] ?? 0) + offset, ts[1] == null ? segEnd : ts[1] + offset], text: c.text });
+      }
+      doneBefore += segCounts[i]; doneThisRun += segCounts[i];
+      state.segDone = i + 1; state.savedAt = Date.now();
+      store(state);
+      liveEl.textContent = '';
+      showResult(state.chunks, state.segDone < totalSegs
+        ? '途中経過（' + state.segDone + ' / ' + totalSegs + ' 区切り完了・自動保存済み）'
+        : '');
     }
 
-    lastChunks = res.chunks || [];
-    const text = lastChunks.length
-      ? lastChunks.map(c => (c.text || '').trim()).filter(Boolean).join('\n')
-      : (res.text || '').trim();
-    resultEl.value = text;
-    resultCard.classList.remove('hidden');
-    bar.value = bar.max;
-    setStatus('完了しました（' + fmtClock((Date.now() - t0) / 1000) + '）。', 'ok');
-    detailEl.textContent = '動画の長さ ' + fmtClock(audioDuration);
+    audio = null;
+    state.finished = true; store(state);
+    bar.max = totalChunks; bar.value = totalChunks;
     liveEl.style.display = 'none';
+    showResult(state.chunks, '完了（自動保存済み。次にこのページを開いたときも表示されます）');
+    setStatus('完了しました（' + fmtClock((Date.now() - t0) / 1000) + '）。', 'ok');
+    detailEl.textContent = '長さ ' + fmtClock(duration);
     finish();
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
+  }
 
-  // ---- 書き出し ----
+  startBtn.addEventListener('click', () => run(false));
+  restartBtn.addEventListener('click', () => run(true));
+
+  // ---------- 書き出し ----------
   function srtTime(t) {
     t = Math.max(0, t || 0);
-    const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = Math.floor(t % 60), ms = Math.round((t - Math.floor(t)) * 1000);
-    const p = (n, w) => String(Math.min(n, w === 3 ? 999 : n)).padStart(w, '0');
+    const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = Math.floor(t % 60), ms = Math.min(999, Math.round((t - Math.floor(t)) * 1000));
+    const p = (n, w) => String(n).padStart(w, '0');
     return p(h, 2) + ':' + p(m, 2) + ':' + p(s, 2) + ',' + p(ms, 3);
   }
-  function buildSrt() {
+  function buildSrt(chunks) {
     const lines = []; let i = 1;
-    lastChunks.forEach((c, idx) => {
+    chunks.forEach((c) => {
       const text = (c.text || '').trim(); if (!text) return;
-      const ts = c.timestamp || [0, null];
+      const ts = c.timestamp || [0, 0];
       const start = ts[0] ?? 0;
-      let end = ts[1];
-      if (end == null) end = (lastChunks[idx + 1] && lastChunks[idx + 1].timestamp && lastChunks[idx + 1].timestamp[0]) || audioDuration || start + 3;
+      let end = ts[1] ?? start + 3;
       if (end <= start) end = start + 1;
       lines.push(String(i++), srtTime(start) + ' --> ' + srtTime(end), text, '');
     });
     return lines.join('\n');
   }
-  function baseName() { return (file ? file.name.replace(/\.[^.]+$/, '') : 'mojiokoshi') || 'mojiokoshi'; }
+  function baseName() {
+    const n = (file && file.name) || (saved && saved.name) || 'mojiokoshi';
+    return n.replace(/\.[^.]+$/, '') || 'mojiokoshi';
+  }
   function download(content, name, type) {
     try {
       const url = URL.createObjectURL(new Blob([content], { type }));
@@ -398,8 +497,9 @@ self.onmessage = async (e) => {
   });
   $('dlTxt').addEventListener('click', () => download(resultEl.value, baseName() + '.txt', 'text/plain;charset=utf-8'));
   $('dlSrt').addEventListener('click', () => {
-    if (!lastChunks.length) { setStatus('字幕用の時間情報がないため、SRTを作れませんでした。', 'warn'); return; }
-    download(buildSrt(), baseName() + '.srt', 'application/x-subrip;charset=utf-8');
+    const chunks = saved && saved.chunks;
+    if (!chunks || !chunks.length) { setStatus('字幕用の時間情報がないため、SRTを作れませんでした。', 'warn'); return; }
+    download(buildSrt(chunks), baseName() + '.srt', 'application/x-subrip;charset=utf-8');
   });
 })();
 </script>
