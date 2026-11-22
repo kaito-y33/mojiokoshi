@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="文字起こし">
+<title>動画の文字起こし（無料・端末内で処理）</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --ink: #1d1d1f; --sub: #6e6e73;
+    --line: #e3e1dc; --accent: #2f6fde; --accent-ink: #ffffff;
+    --ok: #1f8a4c; --warn: #b26a00; --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111113; --card:#1c1c1f; --ink:#f2f2f4; --sub:#a1a1a6; --line:#2e2e33; --accent:#5b8ff0; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    line-height: 1.6; -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 4px 0 4px; }
+  .lead { color: var(--sub); font-size: 14px; margin: 0 0 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .step { font-size: 13px; font-weight: 700; color: var(--accent); margin-bottom: 6px; letter-spacing: .02em; }
+  label.file {
+    display: block; text-align: center; padding: 18px 12px; border: 2px dashed var(--line);
+    border-radius: 12px; cursor: pointer; font-weight: 600;
+  }
+  label.file small { display: block; font-weight: 400; color: var(--sub); margin-top: 4px; }
+  input[type=file] { display: none; }
+  .fileinfo { font-size: 14px; color: var(--sub); margin-top: 8px; word-break: break-all; }
+  .models { display: grid; gap: 8px; }
+  .models label {
+    display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
+    border: 1px solid var(--line); border-radius: 10px; cursor: pointer;
+  }
+  .models input { margin-top: 5px; transform: scale(1.2); }
+  .models b { display: block; }
+  .models span { font-size: 13px; color: var(--sub); }
+  button {
+    font: inherit; font-weight: 700; border: 0; border-radius: 12px; padding: 14px 16px;
+    width: 100%; cursor: pointer; background: var(--accent); color: var(--accent-ink);
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .row button { padding: 12px 8px; font-size: 14px; }
+  .status { font-size: 15px; margin: 10px 0 6px; min-height: 1.6em; }
+  .status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.err { color: var(--err); }
+  progress { width: 100%; height: 10px; accent-color: var(--accent); }
+  .meta { font-size: 13px; color: var(--sub); display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  textarea {
+    width: 100%; min-height: 260px; font: inherit; font-size: 16px; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px; resize: vertical;
+  }
+  .live { font-size: 14px; color: var(--sub); white-space: pre-wrap; max-height: 140px; overflow: auto;
+          background: var(--bg); border-radius: 10px; padding: 10px; margin-top: 8px; display: none; }
+  .note { font-size: 13px; color: var(--sub); }
+  .note li { margin-bottom: 4px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>動画の文字起こし</h1>
+  <p class="lead">無料・登録不要。動画はこのiPhoneの中だけで処理され、どこにも送信されません。</p>
+
+  <section class="card">
+    <div class="step">① 動画を選ぶ</div>
+    <label class="file" for="file">
+      タップして動画を選ぶ
+      <small>写真アプリの動画、またはファイル（mp4 / mov / m4a / mp3 など）</small>
+    </label>
+    <input id="file" type="file" accept="video/*,audio/*">
+    <div id="fileinfo" class="fileinfo"></div>
+  </section>
+
+  <section class="card">
+    <div class="step">② 精度を選ぶ</div>
+    <div class="models">
+      <label><input type="radio" name="model" value="onnx-community/whisper-base" checked>
+        <div><b>標準（おすすめ）</b><span>最初に約80〜200MBを読み込みます。まずはこれで試してください。</span></div></label>
+      <label><input type="radio" name="model" value="onnx-community/whisper-small">
+        <div><b>高精度</b><span>日本語がより正確。約250〜600MBと重く、古いiPhoneでは止まることがあります。</span></div></label>
+      <label><input type="radio" name="model" value="onnx-community/whisper-tiny">
+        <div><b>お試し（速いが不正確）</b><span>約40〜100MB。動作確認用です。</span></div></label>
+    </div>
+    <p class="note" style="margin:10px 0 0">読み込んだデータはブラウザに保存されるので、2回目からは速くなります。初回はWi-Fiで使ってください。</p>
+  </section>
+
+  <section class="card">
+    <div class="step">③ 文字起こしする</div>
+    <button id="start" disabled>動画を選んでください</button>
+    <div id="status" class="status"></div>
+    <progress id="bar" class="hidden" max="100" value="0"></progress>
+    <div class="meta"><span id="detail"></span><span id="elapsed"></span></div>
+    <div id="live" class="live"></div>
+    <p class="note" style="margin:10px 0 0">処理中は<b>このページを開いたまま</b>にしてください。ほかのアプリに切り替えると止まることがあります。</p>
+  </section>
+
+  <section id="resultCard" class="card hidden">
+    <div class="step">④ 結果</div>
+    <textarea id="result" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="copy">コピー</button>
+      <button id="dlTxt" class="secondary">テキスト保存</button>
+      <button id="dlSrt" class="secondary">字幕(SRT)保存</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="step">うまくいかないとき</div>
+    <ul class="note" style="padding-left:18px;margin:0">
+      <li>途中でページが再読み込みされる → iPhoneのメモリ不足です。「標準」か「お試し」に変えるか、動画を短く分けてください。</li>
+      <li>「音声を読み込めませんでした」と出る → 動画を短くするか、音声だけのファイル（m4a）にしてから選んでください。</li>
+      <li>とても遅い → iOS 26以降で、Safariを最新にしてください（GPUが使えると速くなります）。</li>
+      <li>目安は10分以内の動画です。長い動画は写真アプリの「編集」で分けてから使ってください。</li>
+    </ul>
+  </section>
+</main>
+
+<script id="worker-src" type="text/plain">
+import { pipeline, env, WhisperTextStreamer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+
+env.allowLocalModels = false;
+env.useBrowserCache = true;
+
+let asr = null;
+let loadedKey = '';
+
+function dtypeFor(device) {
+  // WebGPU: 実績のある組み合わせ / WASM: 8bit量子化で軽量化
+  return device === 'webgpu'
+    ? { encoder_model: 'fp32', decoder_model_merged: 'q4' }
+    : 'q8';
+}
+
+async function load(model, device) {
+  const key = model + '|' + device;
+  if (asr && loadedKey === key) return;
+  if (asr && asr.dispose) { try { await asr.dispose(); } catch (_) {} }
+  asr = null;
+  const files = {};
+  asr = await pipeline('automatic-speech-recognition', model, {
+    device,
+    dtype: dtypeFor(device),
+    progress_callback: (p) => {
+      if (p.status === 'progress' && p.file) {
+        files[p.file] = { loaded: p.loaded || 0, total: p.total || 0 };
+        let loaded = 0, total = 0;
+        for (const f of Object.values(files)) { loaded += f.loaded; total += f.total; }
+        self.postMessage({ type: 'download', loaded, total });
+      }
+    },
+  });
+  loadedKey = key;
+}
+
+self.onmessage = async (e) => {
+  const { audio, model, device, totalChunks } = e.data;
+  try {
+    self.postMessage({ type: 'phase', phase: 'loading', device });
+    await load(model, device);
+
+    self.postMessage({ type: 'phase', phase: 'running', device });
+    let done = 0;
+    const streamer = new WhisperTextStreamer(asr.tokenizer, {
+      callback_function: (text) => self.postMessage({ type: 'live', text }),
+      on_finalize: () => { done++; self.postMessage({ type: 'chunk', done, total: totalChunks }); },
+    });
+
+    const out = await asr(audio, {
+      language: 'japanese',
+      task: 'transcribe',
+      chunk_length_s: 30,
+      stride_length_s: 5,
+      return_timestamps: true,
+      streamer,
+    });
+    self.postMessage({ type: 'done', text: out.text, chunks: out.chunks || [] });
+  } catch (err) {
+    asr = null; loadedKey = '';
+    self.postMessage({ type: 'error', message: String((err && err.message) || err) });
+  }
+};
+</script>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const fileInput = $('file'), startBtn = $('start'), statusEl = $('status'), bar = $('bar');
+  const detailEl = $('detail'), elapsedEl = $('elapsed'), liveEl = $('live');
+  const resultCard = $('resultCard'), resultEl = $('result');
+
+  let file = null, worker = null, busy = false, timer = null, t0 = 0;
+  let lastChunks = [], audioDuration = 0, wakeLock = null;
+
+  function setStatus(text, kind) { statusEl.textContent = text; statusEl.className = 'status' + (kind ? ' ' + kind : ''); }
+  function fmtMB(b) { return (b / 1048576).toFixed(0) + 'MB'; }
+  function fmtClock(sec) { sec = Math.max(0, Math.round(sec)); const m = Math.floor(sec / 60), s = sec % 60; return m + '分' + String(s).padStart(2, '0') + '秒'; }
+  function selectedModel() { return document.querySelector('input[name=model]:checked').value; }
+
+  fileInput.addEventListener('change', () => {
+    file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    if (!file) { $('fileinfo').textContent = ''; startBtn.disabled = true; startBtn.textContent = '動画を選んでください'; return; }
+    $('fileinfo').textContent = '選択中：' + file.name + '（' + fmtMB(file.size) + '）';
+    startBtn.disabled = false; startBtn.textContent = '文字起こしを始める';
+    if (file.size > 700 * 1048576) setStatus('ファイルが大きいため、途中で止まる可能性があります。短く分けるのがおすすめです。', 'warn');
+    else setStatus('');
+  });
+
+  async function decodeTo16kMono(f) {
+    const buf = await f.arrayBuffer();
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC();
+    let decoded;
+    try {
+      decoded = await new Promise((resolve, reject) => {
+        const p = ctx.decodeAudioData(buf, resolve, reject);
+        if (p && p.then) p.then(resolve, reject);
+      });
+    } finally { try { ctx.close(); } catch (_) {} }
+    const rate = 16000;
+    const length = Math.max(1, Math.ceil(decoded.duration * rate));
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const off = new OAC(1, length, rate);
+    const src = off.createBufferSource();
+    src.buffer = decoded; src.connect(off.destination); src.start(0);
+    const rendered = await off.startRendering();
+    return { audio: rendered.getChannelData(0), duration: decoded.duration };
+  }
+
+  function countChunks(duration) { return duration <= 30 ? 1 : 1 + Math.ceil((duration - 30) / 20); }
+
+  async function hasWebGPU() {
+    try { return !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch (_) { return false; }
+  }
+
+  function makeWorker() {
+    const code = document.getElementById('worker-src').textContent;
+    const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    return new Worker(url, { type: 'module' });
+  }
+
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+  }
+  function releaseAwake() { try { wakeLock && wakeLock.release(); } catch (_) {} wakeLock = null; }
+
+  function startTimer() { t0 = Date.now(); clearInterval(timer); timer = setInterval(() => { elapsedEl.textContent = '経過 ' + fmtClock((Date.now() - t0) / 1000); }, 1000); }
+  function stopTimer() { clearInterval(timer); }
+
+  function finish() { busy = false; startBtn.disabled = !file; startBtn.textContent = '文字起こしを始める'; stopTimer(); releaseAwake(); }
+
+  function runOnWorker(audio, device, totalChunks) {
+    return new Promise((resolve, reject) => {
+      if (!worker) worker = makeWorker();
+      worker.onerror = (ev) => { ev.preventDefault && ev.preventDefault(); worker.terminate(); worker = null; reject(new Error((ev && ev.message) || 'ワーカーの起動に失敗しました')); };
+      worker.onmessage = (ev) => {
+        const m = ev.data;
+        if (m.type === 'phase' && m.phase === 'loading') {
+          setStatus('文字起こし用のデータを準備しています…（初回のみ時間がかかります）');
+          bar.classList.remove('hidden'); bar.removeAttribute('value');
+          detailEl.textContent = m.device === 'webgpu' ? 'GPUで処理します' : 'CPUで処理します（少し遅め）';
+        } else if (m.type === 'download') {
+          if (m.total > 0) { bar.max = 100; bar.value = Math.min(100, m.loaded / m.total * 100); detailEl.textContent = 'ダウンロード中 ' + fmtMB(m.loaded) + ' / ' + fmtMB(m.total); }
+        } else if (m.type === 'phase' && m.phase === 'running') {
+          setStatus('文字起こし中です。このページを開いたままお待ちください。');
+          bar.max = totalChunks; bar.value = 0;
+          detailEl.textContent = '0 / ' + totalChunks + ' 区間（' + (m.device === 'webgpu' ? 'GPU' : 'CPU') + '）';
+          liveEl.style.display = 'block'; liveEl.textContent = '';
+        } else if (m.type === 'live') {
+          liveEl.textContent += m.text; liveEl.scrollTop = liveEl.scrollHeight;
+        } else if (m.type === 'chunk') {
+          bar.value = Math.min(m.done, totalChunks);
+          const remain = m.done > 0 ? (Date.now() - t0) / m.done * (totalChunks - m.done) / 1000 : 0;
+          detailEl.textContent = Math.min(m.done, totalChunks) + ' / ' + totalChunks + ' 区間　残り約' + fmtClock(remain);
+        } else if (m.type === 'done') {
+          resolve(m);
+        } else if (m.type === 'error') {
+          reject(new Error(m.message));
+        }
+      };
+      worker.postMessage({ audio, model: selectedModel(), device, totalChunks });
+    });
+  }
+
+  startBtn.addEventListener('click', async () => {
+    if (!file || busy) return;
+    busy = true; startBtn.disabled = true; startBtn.textContent = '処理中…';
+    resultCard.classList.add('hidden'); liveEl.style.display = 'none';
+    bar.classList.remove('hidden'); bar.removeAttribute('value');
+    detailEl.textContent = ''; elapsedEl.textContent = '';
+    await keepAwake(); startTimer();
+
+    let audio;
+    try {
+      setStatus('動画から音声を取り出しています…');
+      const r = await decodeTo16kMono(file);
+      audio = r.audio; audioDuration = r.duration;
+      if (audioDuration < 0.5) throw new Error('short');
+    } catch (e) {
+      setStatus('音声を読み込めませんでした。動画を短くするか、音声だけのファイル（m4a）にしてから選んでください。', 'err');
+      bar.classList.add('hidden'); finish(); return;
+    }
+
+    const totalChunks = countChunks(audioDuration);
+    detailEl.textContent = '長さ ' + fmtClock(audioDuration);
+
+    let device = (await hasWebGPU()) ? 'webgpu' : 'wasm';
+    let res;
+    try {
+      res = await runOnWorker(audio, device, totalChunks);
+    } catch (e1) {
+      if (device === 'webgpu') {
+        setStatus('GPUで動かせなかったため、CPUで処理し直します…', 'warn');
+        if (worker) { worker.terminate(); worker = null; }
+        device = 'wasm';
+        try { res = await runOnWorker(audio, device, totalChunks); }
+        catch (e2) { setStatus('エラーで止まりました：' + e2.message + '（精度を「標準」か「お試し」にすると動くことがあります）', 'err'); finish(); return; }
+      } else {
+        setStatus('エラーで止まりました：' + e1.message + '（精度を「標準」か「お試し」にすると動くことがあります）', 'err'); finish(); return;
+      }
+    }
+
+    lastChunks = res.chunks || [];
+    const text = lastChunks.length
+      ? lastChunks.map(c => (c.text || '').trim()).filter(Boolean).join('\n')
+      : (res.text || '').trim();
+    resultEl.value = text;
+    resultCard.classList.remove('hidden');
+    bar.value = bar.max;
+    setStatus('完了しました（' + fmtClock((Date.now() - t0) / 1000) + '）。', 'ok');
+    detailEl.textContent = '動画の長さ ' + fmtClock(audioDuration);
+    liveEl.style.display = 'none';
+    finish();
+    resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  // ---- 書き出し ----
+  function srtTime(t) {
+    t = Math.max(0, t || 0);
+    const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = Math.floor(t % 60), ms = Math.round((t - Math.floor(t)) * 1000);
+    const p = (n, w) => String(Math.min(n, w === 3 ? 999 : n)).padStart(w, '0');
+    return p(h, 2) + ':' + p(m, 2) + ':' + p(s, 2) + ',' + p(ms, 3);
+  }
+  function buildSrt() {
+    const lines = []; let i = 1;
+    lastChunks.forEach((c, idx) => {
+      const text = (c.text || '').trim(); if (!text) return;
+      const ts = c.timestamp || [0, null];
+      const start = ts[0] ?? 0;
+      let end = ts[1];
+      if (end == null) end = (lastChunks[idx + 1] && lastChunks[idx + 1].timestamp && lastChunks[idx + 1].timestamp[0]) || audioDuration || start + 3;
+      if (end <= start) end = start + 1;
+      lines.push(String(i++), srtTime(start) + ' --> ' + srtTime(end), text, '');
+    });
+    return lines.join('\n');
+  }
+  function baseName() { return (file ? file.name.replace(/\.[^.]+$/, '') : 'mojiokoshi') || 'mojiokoshi'; }
+  function download(content, name, type) {
+    try {
+      const url = URL.createObjectURL(new Blob([content], { type }));
+      const a = document.createElement('a'); a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (_) { setStatus('保存できませんでした。「コピー」を使ってメモアプリに貼り付けてください。', 'warn'); }
+  }
+
+  $('copy').addEventListener('click', async () => {
+    const t = resultEl.value;
+    try { await navigator.clipboard.writeText(t); setStatus('コピーしました。メモアプリなどに貼り付けられます。', 'ok'); }
+    catch (_) { resultEl.focus(); resultEl.select(); setStatus('文字を選択しました。表示されたメニューから「コピー」を押してください。', 'warn'); }
+  });
+  $('dlTxt').addEventListener('click', () => download(resultEl.value, baseName() + '.txt', 'text/plain;charset=utf-8'));
+  $('dlSrt').addEventListener('click', () => {
+    if (!lastChunks.length) { setStatus('字幕用の時間情報がないため、SRTを作れませんでした。', 'warn'); return; }
+    download(buildSrt(), baseName() + '.srt', 'application/x-subrip;charset=utf-8');
+  });
+})();
+</script>
+</body>
+</html>
