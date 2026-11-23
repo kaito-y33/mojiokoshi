@@ -94,6 +94,7 @@
         <div><b>お試し（速いが不正確）</b><span>約40〜100MB。動作確認用です。</span></div></label>
     </div>
     <label class="cpu"><input type="checkbox" id="cpuOnly"> CPUで処理する（落ちにくいが遅い）</label>
+    <p id="cpuNote" class="note hidden" style="margin:4px 0 0">iPhoneでは、AIモデルの読み込み中に落ちるのを防ぐため最初からオンにしています。</p>
     <p class="note" style="margin:10px 0 0">読み込んだデータはブラウザに保存されるので、2回目からは速くなります。初回はWi-Fiで使ってください。</p>
   </section>
 
@@ -211,6 +212,10 @@ self.onmessage = async (e) => {
   const KEY = 'mojiokoshi:last';
   const STAGE_KEY = 'mojiokoshi:stage';
   const CPU_KEY = 'mojiokoshi:cpu';
+  const MODEL_KEY = 'mojiokoshi:model';
+  const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const MODELS = ['onnx-community/whisper-small', 'onnx-community/whisper-base', 'onnx-community/whisper-tiny'];
+  const MODEL_LABEL = { 'onnx-community/whisper-small': '高精度', 'onnx-community/whisper-base': '標準', 'onnx-community/whisper-tiny': 'お試し' };
   const MB_URL = 'https://cdn.jsdelivr.net/npm/mediabunny@1.66.2/dist/bundles/mediabunny.min.mjs';
 
   let file = null, worker = null, busy = false, timer = null, t0 = 0, wakeLock = null;
@@ -225,8 +230,20 @@ self.onmessage = async (e) => {
   function clearStage() { lsDel(STAGE_KEY); }
   const STAGE_LABEL = { decode: '音声の取り出し', model: 'AIモデルの読み込み', run: '文字起こし' };
 
-  cpuBox.checked = lsGet(CPU_KEY) === '1';
-  cpuBox.addEventListener('change', () => { cpuBox.checked ? lsSet(CPU_KEY, '1') : lsDel(CPU_KEY); });
+  // CPU処理：iPhoneでは最初からオン（GPU処理はモデルの読み込みでメモリを大きく使うため）
+  const cpuPref = lsGet(CPU_KEY);
+  cpuBox.checked = cpuPref === null ? IS_IOS : cpuPref === '1';
+  if (IS_IOS && cpuPref === null) $('cpuNote').classList.remove('hidden');
+  cpuBox.addEventListener('change', () => { lsSet(CPU_KEY, cpuBox.checked ? '1' : '0'); });
+
+  // 選んだ精度を覚えておく
+  function setModel(v) { const r = document.querySelector('input[name=model][value="' + v + '"]'); if (r) r.checked = true; }
+  const modelPref = lsGet(MODEL_KEY);
+  if (modelPref && MODELS.includes(modelPref)) setModel(modelPref);
+  document.querySelectorAll('input[name=model]').forEach((r) => r.addEventListener('change', () => {
+    lsSet(MODEL_KEY, r.value);
+    if (IS_IOS && r.value === MODELS[0] && r.checked) setStatus('「高精度」はiPhoneではメモリ不足で落ちることが多いです。落ちる場合は「標準」に戻してください。', 'warn');
+  }));
 
   let crashMsg = '';
   try {
@@ -236,8 +253,12 @@ self.onmessage = async (e) => {
       if ((st.stage === 'model' || st.stage === 'run') && st.device === 'webgpu') {
         cpuBox.checked = true; lsSet(CPU_KEY, '1');
         crashMsg += '次はCPUで処理するように切り替えました（遅くなりますが落ちにくくなります）。';
+      } else if (st.device === 'wasm' && st.stage === 'model' && st.model && MODELS.indexOf(st.model) >= 0 && MODELS.indexOf(st.model) < MODELS.length - 1) {
+        const lower = MODELS[MODELS.indexOf(st.model) + 1];
+        setModel(lower); lsSet(MODEL_KEY, lower);
+        crashMsg += '次は精度を「' + MODEL_LABEL[lower] + '」に下げました（使うメモリが少なくなります）。ほかのアプリを終了してから試すと、さらに落ちにくくなります。';
       } else if (st.device === 'wasm') {
-        crashMsg += '精度を「お試し」にするか、ほかのアプリを終了してから試してください。';
+        crashMsg += 'ほかのアプリをすべて終了し、iPhoneを再起動してから試してください。';
       } else if (st.stage === 'decode') {
         crashMsg += 'ファイルを短く分けてから試してください。';
       }
